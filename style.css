@@ -456,3 +456,81 @@ button { cursor: pointer; }
 @media (min-width: 560px) {
   .sheet { margin: auto; border-radius: 20px; }
 }
+
+/* ---------- 観戦 ---------- */
+.hint { font-size: 13px; color: var(--muted); margin: 8px 0 0; }
+.watchers { font-size: 12px; color: var(--muted); margin: 8px 16px 0; text-align: center; }
+.panel .watchers { margin: 10px 0 0; text-align: left; }
+.lineup { font-size: 13px; color: var(--kin); margin: 0 0 10px; text-align: center; }
+.tray .lineup { margin-top: 12px; }
+.btn-toggle[aria-pressed="true"] { border-color: var(--kin); color: var(--kin); }
+.btn.grow { min-width: 0; font-size: 14px; padding: 0 10px; }
+
+/* 応援スタンプ：脱落の印と同じハンコの意匠 */
+.cheer-bar { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 12px; }
+.cheer-btn {
+  min-height: 46px;
+  border-radius: 999px;
+  background: transparent;
+  border: 1.5px solid currentColor;
+  font-family: var(--mincho);
+  font-weight: 800;
+  font-size: 15px;
+  letter-spacing: 0.06em;
+  transition: transform 80ms ease;
+}
+.cheer-btn:active { transform: scale(0.94); }
+.cheer-btn.cheer--kin { color: var(--kin); }
+.cheer-btn.cheer--shu { color: #ef7a63; }
+
+.cheers { position: fixed; inset: 0; pointer-events: none; z-index: 30; overflow: hidden; }
+.cheer {
+  position: absolute;
+  bottom: 36%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  animation: cheerUp 2100ms cubic-bezier(0.2, 0.7, 0.3, 1) forwards;
+}
+.cheer .seal {
+  width: 62px;
+  height: 62px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-family: var(--mincho);
+  font-weight: 800;
+  font-size: 15px;
+  letter-spacing: 0.04em;
+  background: rgba(247, 240, 228, 0.96);
+  border: 2.5px solid currentColor;
+  outline: 1.5px solid currentColor;
+  outline-offset: 2px;
+  transform: rotate(var(--rot, 0deg));
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+}
+.cheer--kin .seal { color: #8a6516; }
+.cheer--shu .seal { color: var(--shu); }
+.cheer .by {
+  font-size: 11px;
+  color: var(--gofun);
+  background: rgba(0, 0, 0, 0.5);
+  padding: 0 8px;
+  border-radius: 999px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@keyframes cheerUp {
+  0% { opacity: 0; transform: translateY(16px) scale(0.5); }
+  12% { opacity: 1; transform: translateY(0) scale(1.08); }
+  20% { transform: translateY(-6px) scale(1); }
+  75% { opacity: 1; transform: translateY(-70px) scale(1); }
+  100% { opacity: 0; transform: translateY(-110px) scale(1); }
+}
+@keyframes cheerFade { 0% { opacity: 0; } 10% { opacity: 1; } 80% { opacity: 1; } 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .cheers .cheer { animation-name: cheerFade !important; animation-duration: 1800ms !important; animation-delay: 0ms !important; }
+}

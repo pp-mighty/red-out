@@ -3,13 +3,15 @@
  * データの形（Firebase / テストモード共通）:
  * rooms/{CODE} = {
  *   createdAt, hostId, target(対戦人数), phase('lobby'|'game'), matchCount,
- *   players: { pid: { name, joinedAt } },
- *   presence: { pid: true|false },            // 接続中かどうか
- *   scores: { pid: 勝ち数 },
- *   match: {                                  // 進行中または直前の試合
+ *   players:  { pid: { name, joinedAt, sitOut? } },   // 対戦する人（sitOut = 次は観戦にまわる）
+ *   watchers: { pid: { name, joinedAt, wantsIn? } },  // 観戦する人（名前は空でもよい。wantsIn = 次の試合に参加）
+ *   presence: { pid: true|false },                    // 接続中かどうか
+ *   scores:   { pid: 勝ち数 },
+ *   cheers:   { pid: { k, t, n } },                   // 応援スタンプ（1人1枠を上書き）
+ *   match: {                                          // 進行中または直前の試合
  *     id, turn, order[], names{}, alive{}, hands{},
- *     commits: { t1: { pid: SHA-256 } },      // 伏せた札（ハッシュだけ）
- *     reveals: { t1: { pid: { card, salt } } },// 全員そろったら公開
+ *     commits: { t1: { pid: SHA-256 } },              // 伏せた札（ハッシュだけ）
+ *     reveals: { t1: { pid: { card, salt } } },       // 全員そろったら公開
  *     log: {...}, last, winner, rematches
  *   }
  * }
@@ -30,6 +32,12 @@
   const ID_CHARS = 'abcdefghijkmnpqrstuvwxyz23456789';
   const HEX = '0123456789abcdef';
   const REVEAL_MS = 1300;
+  const CHEERS = [
+    { k: 'clap', label: '拍手', tone: 'kin' },
+    { k: 'nice', label: '見事', tone: 'kin' },
+    { k: 'wow', label: 'まさか', tone: 'shu' },
+    { k: 'close', label: '惜しい', tone: 'shu' },
+  ];
 
   const state = {
     store: null,
@@ -41,7 +49,8 @@
     room: null,
     roomLoaded: false,
     unsub: null,
-    member: false,
+    member: false,     // 対戦する人として部屋にいる
+    watching: false,   // 観戦する人として部屋にいる
     presenceFor: null,
     invite: null,
     notice: '',
@@ -57,6 +66,9 @@
     fanPlayed: false,
     wakeLock: null,
     sheetView: null,
+    cheerSeen: {},
+    cheerInit: false,
+    lastCheerAt: 0,
   };
 
   // ---------- 小さな道具 ----------
@@ -145,13 +157,34 @@
     } catch (e) { /* 省電力モードなどで拒否されても問題なし */ }
   }
 
+  function inRoom() {
+    return (state.member || state.watching) && Boolean(state.room);
+  }
+
   // ---------- 部屋データの読み取り ----------
   function playersOf(room) {
     const ps = (room && room.players) || {};
     return Object.keys(ps)
       .filter(function (id) { return ps[id] && ps[id].name; })
-      .map(function (id) { return { pid: id, name: ps[id].name, joinedAt: ps[id].joinedAt || 0 }; })
+      .map(function (id) { return { pid: id, name: ps[id].name, joinedAt: ps[id].joinedAt || 0, sitOut: Boolean(ps[id].sitOut) }; })
       .sort(function (a, b) { return a.joinedAt - b.joinedAt || (a.pid < b.pid ? -1 : 1); });
+  }
+
+  function watchersOf(room) {
+    const ws = (room && room.watchers) || {};
+    return Object.keys(ws)
+      .filter(function (id) { return ws[id] && typeof ws[id] === 'object'; })
+      .map(function (id) { return { pid: id, name: ws[id].name || '', joinedAt: ws[id].joinedAt || 0, wantsIn: Boolean(ws[id].wantsIn) }; })
+      .sort(function (a, b) { return a.joinedAt - b.joinedAt || (a.pid < b.pid ? -1 : 1); });
+  }
+
+  // 次の試合のメンバー（残る人＋参加希望の観戦者、最大8人まで申し込み順）
+  function nextLineup(room) {
+    const ps = playersOf(room);
+    const stay = ps.filter(function (p) { return !p.sitOut; });
+    const leaving = ps.filter(function (p) { return p.sitOut; });
+    const joining = watchersOf(room).filter(function (w) { return w.wantsIn && w.name; });
+    return { stay: stay, leaving: leaving, joining: joining, lineup: stay.concat(joining).slice(0, MAX_PLAYERS) };
   }
 
   function isOnline(pid) {
@@ -169,7 +202,7 @@
   }
 
   function amHost() {
-    return Boolean(state.room) && hostPid(state.room) === state.pid;
+    return state.member && Boolean(state.room) && hostPid(state.room) === state.pid;
   }
 
   function winsOf(pid) {
@@ -180,11 +213,21 @@
   function nameOf(m, pid) {
     if (m && m.names && m.names[pid]) return m.names[pid];
     const p = state.room && state.room.players && state.room.players[pid];
-    return (p && p.name) || '？';
+    if (p && p.name) return p.name;
+    const w = state.room && state.room.watchers && state.room.watchers[pid];
+    return (w && w.name) || '？';
   }
 
   function who(m, pid) {
     return pid === state.pid ? 'あなた' : nameOf(m, pid) + 'さん';
+  }
+
+  function myName() {
+    const r = state.room;
+    const p = r && r.players && r.players[state.pid];
+    if (p && p.name) return p.name;
+    const w = r && r.watchers && r.watchers[state.pid];
+    return (w && w.name) || '';
   }
 
   // ---------- 札の見た目 ----------
@@ -246,7 +289,35 @@
       '<li>生き残った全員が5枚を使い切ったら、手札を戻して再戦します。</li>' +
       '</ul>' +
       '<h3>読み合いのコツ</h3>' +
-      '<p>相手が使った札は、席の小さな札で薄く表示されます。残りの札から、相手が次に出せるものを読みましょう。</p>';
+      '<p>相手が使った札は、席の小さな札で薄く表示されます。残りの札から、相手が次に出せるものを読みましょう。</p>' +
+      '<h3>観戦</h3>' +
+      '<p>招待リンクから「観戦する」を選ぶと、名前なしでも観戦できます。伏せた札は観戦者にも公開まで見えません。試合が終わったら「次の試合に参加する」で対戦に加われます。</p>';
+  }
+
+  function watchersLineHtml() {
+    const ws = watchersOf(state.room).filter(function (w) { return isOnline(w.pid); });
+    if (!ws.length) return '';
+    const named = ws.map(function (w) {
+      if (w.pid === state.pid) return 'あなた';
+      return w.name ? w.name + 'さん' : null;
+    }).filter(Boolean);
+    const shown = named.slice(0, 3);
+    const rest = ws.length - shown.length;
+    let text = '観戦 ' + ws.length + '人';
+    if (shown.length) text += '：' + shown.join('、') + (rest > 0 ? ' ほか' + rest + '人' : '');
+    return '<p class="watchers">' + esc(text) + '</p>';
+  }
+
+  function cheerBarHtml() {
+    return '<div class="cheer-bar" role="group" aria-label="応援スタンプ">' + CHEERS.map(function (c) {
+      return '<button class="cheer-btn cheer--' + c.tone + '" data-action="cheer" data-kind="' + c.k + '">' + c.label + '</button>';
+    }).join('') + '</div>';
+  }
+
+  function nameInputHtml(placeholder) {
+    const name = state.form.name != null ? state.form.name : state.name;
+    return '<label class="label" for="name">名前</label>' +
+      '<input class="input" id="name" maxlength="12" autocomplete="nickname" enterkeyhint="done" placeholder="' + placeholder + '" value="' + esc(name) + '">';
   }
 
   // ---------- 画面 ----------
@@ -263,10 +334,6 @@
       }).join('') + '</div>';
     state.fanPlayed = true;
 
-    const name = state.form.name != null ? state.form.name : state.name;
-    const nameField =
-      '<label class="label" for="name">名前</label>' +
-      '<input class="input" id="name" maxlength="12" autocomplete="nickname" enterkeyhint="done" placeholder="対戦相手に表示されます" value="' + esc(name) + '">';
     const busy = state.busy ? ' disabled' : '';
     const targetOptions = [];
     for (let n = MIN_PLAYERS; n <= MAX_PLAYERS; n++) {
@@ -281,27 +348,42 @@
       '<form data-form="join" class="row">' +
       '<div class="grow"><label class="label" for="code">部屋コード</label>' +
       '<input class="input input-code" id="code" maxlength="5" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="go" placeholder="ABCDE" value="' + esc(state.form.code) + '"></div>' +
-      '<button class="btn btn-ghost" type="submit"' + busy + '>参加する</button></form>';
+      '<button class="btn btn-ghost" type="submit"' + busy + '>参加する</button></form>' +
+      '<div class="home-foot" style="margin-top:6px"><button class="btn btn-text" data-action="watch-code"' + busy + '>このコードの部屋を観戦する</button></div>';
     const error = state.error ? '<p class="error" role="alert">' + esc(state.error) + '</p>' : '';
 
     let panel;
     if (state.invite) {
-      const missing = state.roomLoaded && !state.room;
+      const room = state.room;
+      const missing = state.roomLoaded && !room;
+      const playing = Boolean(room && room.phase === 'game');
+      const full = Boolean(room && room.phase === 'lobby' && playersOf(room).length >= clampTarget(room.target));
+      const canPlay = Boolean(room) && !playing && !full;
+      let body;
+      if (missing) {
+        body = '<p class="error" role="alert">この部屋は見つかりませんでした。招待リンクを確認するか、新しく部屋を作ってください。</p>';
+      } else {
+        body = '<form data-form="invite">' + nameInputHtml('対戦相手に表示されます') +
+          '<p class="hint">観戦だけなら、名前は空欄でも大丈夫です。</p>' +
+          (canPlay
+            ? '<div class="tray-actions" style="margin-top:14px">' +
+              '<button class="btn btn-primary btn-block" type="submit"' + busy + '>対戦に参加する</button>' +
+              '<button class="btn btn-ghost btn-block" type="button" data-action="watch-invite"' + busy + '>観戦する</button></div>'
+            : '<p class="hint">' + (playing ? 'いま対戦中です。観戦しながら、次の試合から参加できます。' : 'この部屋は満員です。観戦はできます。') + '</p>' +
+              '<button class="btn btn-primary btn-block" type="button" data-action="watch-invite" style="margin-top:10px"' + busy + '>観戦する</button>') +
+          '</form>';
+      }
       panel =
         '<section class="panel">' +
         '<h2 class="panel-title">部屋 <span class="invite-code">' + esc(state.invite) + '</span> に招待されています</h2>' +
-        (missing
-          ? '<p class="error" role="alert">この部屋は見つかりませんでした。招待リンクを確認するか、新しく部屋を作ってください。</p>'
-          : '<form data-form="invite">' + nameField +
-            '<button class="btn btn-primary btn-block" type="submit" style="margin-top:14px"' + busy + '>参加する</button></form>') +
-        error +
+        body + error +
         (state.form.showCreate || missing
-          ? '<div class="or">または</div>' + (missing ? nameField : '') + createForm
+          ? '<div class="or">または</div>' + (missing ? nameInputHtml('対戦相手に表示されます') : '') + createForm
           : '<div class="home-foot"><button class="btn btn-text" data-action="show-create">自分で部屋を作る</button></div>') +
         '</section>';
     } else {
       panel =
-        '<section class="panel">' + nameField + createForm +
+        '<section class="panel">' + nameInputHtml('対戦相手に表示されます') + createForm +
         '<div class="or">または</div>' + joinForm + error + '</section>';
     }
 
@@ -362,7 +444,14 @@
 
     const need = target - ps.length;
     let bottom;
-    if (host) {
+    if (state.watching) {
+      if (need > 0) {
+        bottom = '<form data-form="sit">' + (myName() ? '' : nameInputHtml('対戦に参加するには名前が必要です')) +
+          '<button class="btn btn-primary btn-block" type="submit" style="margin-top:' + (myName() ? '0' : '12px') + '"' + (state.busy ? ' disabled' : '') + '>対戦に参加する</button></form>';
+      } else {
+        bottom = '<p class="tray-note">満員です。観戦しながら、空きが出たら参加できます。</p>';
+      }
+    } else if (host) {
       const label = need > 0 ? 'あと' + need + '人で始められます' : (need < 0 ? '人数を合わせてください' : '対戦を始める');
       bottom = '<button class="btn btn-primary btn-block" data-action="start"' + (need !== 0 || state.busy ? ' disabled' : '') + '>' + label + '</button>';
     } else {
@@ -379,6 +468,7 @@
       '<section class="panel">' +
       '<div class="row" style="align-items:center;margin-bottom:6px"><span class="grow" style="font-weight:700">対戦人数</span><div style="width:130px">' + targetCtl + '</div></div>' +
       '<ul class="seat-list">' + rows.join('') + '</ul>' +
+      watchersLineHtml() +
       '</section>' +
       '</div>' +
       '<div class="tray">' + bottom + '</div>';
@@ -404,6 +494,13 @@
       '</div><span class="play-name">' + esc(pid === state.pid ? 'あなた' : nameOf(m, pid)) + '</span></div>';
   }
 
+  function lineupHtml() {
+    const lu = nextLineup(state.room);
+    if (!lu.joining.length && !lu.leaving.length) return '';
+    const names = lu.lineup.map(function (p) { return p.pid === state.pid ? 'あなた' : p.name; });
+    return '<p class="lineup">次の試合：' + esc(names.join('、')) + '</p>';
+  }
+
   function renderGame() {
     const room = state.room;
     const m = room.match;
@@ -411,6 +508,7 @@
     const order = G.asArray(m.order);
     const alive = G.alivePids(m);
     const over = G.isOver(m);
+    const watching = order.indexOf(me) === -1;
     const isAlive = Boolean(m.alive && m.alive[me]);
     const tk = G.turnKey(m.turn);
     const commits = (m.commits && m.commits[tk]) || {};
@@ -419,7 +517,7 @@
     const host = amHost();
     const last = m.last || null;
 
-    // 相手の席
+    // 席（自分以外。観戦中は全員）
     const seats = order.filter(function (p) { return p !== me; }).map(function (p) {
       const st = seatState(m, p, allCommitted);
       const forfeitBtn = host && !over && m.alive && m.alive[p] && !isOnline(p)
@@ -487,51 +585,69 @@
         '<p class="caption-sub">' + progress + '</p>';
     }
 
-    // 手札トレイ
-    const hand = (m.hands && m.hands[me]) || {};
-    const myCommit = commits[me];
-    const secret = myCommit ? readSecret(m.id, m.turn) : null;
-    const canPick = isAlive && !over && !myCommit;
-    if (state.selected && (!canPick || !hand[state.selected])) state.selected = null;
-    const cards = G.CARDS.map(function (c) {
-      const has = Boolean(hand[c]);
-      const played = Boolean(secret && secret.card === c && !over);
-      const sel = canPick && state.selected === c;
-      return '<button class="hand-card' + (has ? '' : ' is-used') + (played ? ' is-played' : '') + '" data-action="pick" data-card="' + c + '"' +
-        ' aria-pressed="' + sel + '"' + (canPick && has ? '' : ' disabled') + '>' +
-        cardHtml(c) + '<span class="card-name">' + G.CARD_INFO[c].name + '</span></button>';
-    }).join('');
-
-    let action;
-    if (over) {
-      action = '<div class="tray-actions">' +
-        '<button class="btn btn-primary btn-block" data-action="next" data-match="' + m.id + '"' + (state.busy ? ' disabled' : '') + '>次の試合へ</button>' +
-        (host ? '<button class="btn btn-ghost btn-block" data-action="lobby"' + (state.busy ? ' disabled' : '') + '>ロビーに戻って人数を変える</button>' : '') +
-        '</div>';
-    } else if (!order.includes(me)) {
-      action = '<p class="tray-note">この試合には参加していません。次の試合から参加できます。</p>';
-    } else if (!isAlive) {
-      action = '<p class="tray-note">脱落しました。決着まで観戦できます。</p>';
-    } else if (myCommit && !secret) {
-      action = '<p class="tray-note">この端末には伏せた札の記録がありません。札を出した端末で開き直してください。</p>';
-    } else if (myCommit) {
-      action = '<p class="tray-note">' + (allCommitted ? '公開しています…' : '札を伏せました。全員そろうと公開されます。') + '</p>';
+    // 画面下のトレイ
+    let tray;
+    if (watching) {
+      const meW = (room.watchers && room.watchers[me]) || {};
+      let join = '';
+      if (over) {
+        if (meW.wantsIn) {
+          join = '<div class="row" style="align-items:center;margin-top:12px"><p class="tray-note grow" style="min-height:0">次の試合に参加します。</p>' +
+            '<button class="btn btn-small btn-ghost" data-action="opt-out">取り消す</button></div>';
+        } else {
+          join = '<form data-form="opt-in" style="margin-top:12px">' + (meW.name ? '' : nameInputHtml('対戦に参加するには名前が必要です')) +
+            '<button class="btn btn-primary btn-block" type="submit" style="margin-top:' + (meW.name ? '0' : '12px') + '"' + (state.busy ? ' disabled' : '') + '>次の試合に参加する</button></form>';
+        }
+      }
+      tray = '<div class="tray-head"><strong>観戦中</strong><span>スタンプで応援できます</span></div>' +
+        cheerBarHtml() + (over ? lineupHtml() : '') + join;
     } else {
-      action = '<button class="btn btn-primary btn-block" data-action="commit"' + (state.selected && !state.busy ? '' : ' disabled') + '>' +
-        (state.selected ? G.CARD_INFO[state.selected].name + 'を出す' : '出す札を選んでください') + '</button>';
+      const hand = (m.hands && m.hands[me]) || {};
+      const myCommit = commits[me];
+      const secret = myCommit ? readSecret(m.id, m.turn) : null;
+      const canPick = isAlive && !over && !myCommit;
+      if (state.selected && (!canPick || !hand[state.selected])) state.selected = null;
+      const cards = G.CARDS.map(function (c) {
+        const has = Boolean(hand[c]);
+        const played = Boolean(secret && secret.card === c && !over);
+        const sel = canPick && state.selected === c;
+        return '<button class="hand-card' + (has ? '' : ' is-used') + (played ? ' is-played' : '') + '" data-action="pick" data-card="' + c + '"' +
+          ' aria-pressed="' + sel + '"' + (canPick && has ? '' : ' disabled') + '>' +
+          cardHtml(c) + '<span class="card-name">' + G.CARD_INFO[c].name + '</span></button>';
+      }).join('');
+
+      let action;
+      if (over) {
+        const sitOut = Boolean(room.players && room.players[me] && room.players[me].sitOut);
+        action = lineupHtml() + '<div class="tray-actions">' +
+          '<button class="btn btn-primary btn-block" data-action="next" data-match="' + m.id + '"' + (state.busy ? ' disabled' : '') + '>次の試合へ</button>' +
+          '<div class="row">' +
+          '<button class="btn btn-ghost btn-toggle grow" data-action="sit-out" data-on="' + (sitOut ? '0' : '1') + '" aria-pressed="' + sitOut + '">' + (sitOut ? '✓ ' : '') + '次は観戦にまわる</button>' +
+          (host ? '<button class="btn btn-ghost grow" data-action="lobby"' + (state.busy ? ' disabled' : '') + '>ロビーに戻る</button>' : '') +
+          '</div></div>';
+      } else if (!isAlive) {
+        action = '<p class="tray-note" style="min-height:0;margin-bottom:10px">脱落しました。決着まで観戦できます。</p>' + cheerBarHtml();
+      } else if (myCommit && !secret) {
+        action = '<p class="tray-note">この端末には伏せた札の記録がありません。札を出した端末で開き直してください。</p>';
+      } else if (myCommit) {
+        action = '<p class="tray-note">' + (allCommitted ? '公開しています…' : '札を伏せました。全員そろうと公開されます。') + '</p>';
+      } else {
+        action = '<button class="btn btn-primary btn-block" data-action="commit"' + (state.selected && !state.busy ? '' : ' disabled') + '>' +
+          (state.selected ? G.CARD_INFO[state.selected].name + 'を出す' : '出す札を選んでください') + '</button>';
+      }
+
+      tray = over
+        ? '<div class="tray-head" style="margin-bottom:10px"><strong>通算</strong><span class="wins">あなたは★' + winsOf(me) + '勝</span></div>' + action
+        : '<div class="tray-head"><strong>あなたの手札</strong><span class="wins">★' + winsOf(me) + '勝</span></div>' +
+          '<div class="hand">' + cards + '</div>' + action;
     }
 
     return testmodeHtml() + topbarHtml() +
       '<div class="game' + (order.length >= 5 ? ' is-crowded' : '') + '">' +
       (seats ? '<div class="seats">' + seats + '</div>' : '') +
+      watchersLineHtml() +
       '<section class="field' + (revealing ? ' is-revealing' : '') + '" style="--offset:' + (revealing ? -Math.round(elapsed) : 0) + 'ms" aria-label="場">' + field + '</section>' +
-      '<div class="tray">' +
-      (over
-        ? '<div class="tray-head" style="margin-bottom:10px"><strong>通算</strong><span class="wins">あなたは★' + winsOf(me) + '勝</span></div>'
-        : '<div class="tray-head"><strong>あなたの手札</strong><span class="wins">★' + winsOf(me) + '勝</span></div>' +
-          '<div class="hand">' + cards + '</div>') +
-      action +
-      '</div></div>';
+      '<div class="tray">' + tray + '</div></div>';
   }
 
   function logHtml() {
@@ -571,7 +687,7 @@
       html = head('メニュー') +
         '<button class="btn btn-ghost btn-block" data-action="share">招待リンクを送る</button>' +
         rulesHtml() +
-        '<div style="margin-top:24px"><button class="btn btn-danger btn-block" data-action="leave">部屋から退出する</button></div>';
+        '<div style="margin-top:24px"><button class="btn btn-danger btn-block" data-action="leave">' + (state.watching ? '観戦をやめる' : '部屋から退出する') + '</button></div>';
     }
     if (view === 'log') html = head('記録') + logHtml();
     sheetBody.innerHTML = html;
@@ -610,7 +726,7 @@
   function render() {
     if (!state.store) return;
     let html;
-    if (state.member && state.room) {
+    if (inRoom()) {
       html = state.room.phase === 'game' && state.room.match ? renderGame() : renderLobby();
     } else {
       html = renderHome();
@@ -622,7 +738,66 @@
       restoreFocus(f);
     }
     if (sheet.open && state.sheetView === 'log') renderSheet('log');
-    if (sheet.open && state.sheetView === 'menu' && !state.member) closeSheet();
+    if (sheet.open && state.sheetView === 'menu' && !inRoom()) closeSheet();
+  }
+
+  // ---------- 応援スタンプ ----------
+  const cheerLayer = document.createElement('div');
+  cheerLayer.className = 'cheers';
+  cheerLayer.setAttribute('aria-hidden', 'true');
+  document.body.appendChild(cheerLayer);
+
+  function spawnCheer(c) {
+    const def = CHEERS.find(function (x) { return x.k === c.k; });
+    if (!def) return;
+    const el = document.createElement('div');
+    el.className = 'cheer cheer--' + def.tone;
+    // 札や結果に重ならないよう、画面の左右の端から浮かび上がらせる
+    el.style.left = (Math.random() < 0.5 ? 3 + Math.random() * 15 : 66 + Math.random() * 13) + '%';
+    el.style.setProperty('--rot', (Math.random() * 24 - 12).toFixed(1) + 'deg');
+    const seal = document.createElement('span');
+    seal.className = 'seal';
+    seal.textContent = def.label;
+    el.appendChild(seal);
+    if (c.n) {
+      const by = document.createElement('span');
+      by.className = 'by';
+      by.textContent = c.n;
+      el.appendChild(by);
+    }
+    cheerLayer.appendChild(el);
+    while (cheerLayer.children.length > 12) cheerLayer.firstChild.remove();
+    setTimeout(function () { el.remove(); }, 2300);
+  }
+
+  // 届いたスタンプのうち、まだ表示していないものだけを出す（端末間の時計のずれに影響されない）
+  function processCheers(room) {
+    const ch = (room && room.cheers) || {};
+    const first = !state.cheerInit;
+    Object.keys(ch).forEach(function (sid) {
+      const c = ch[sid];
+      if (!c || !c.t) return;
+      const key = c.t + ':' + (c.k || '');
+      if (state.cheerSeen[sid] === key) return;
+      state.cheerSeen[sid] = key;
+      if (!first && inRoom()) spawnCheer(c);
+    });
+    state.cheerInit = true;
+  }
+
+  function canCheer() {
+    if (!inRoom()) return false;
+    if (state.watching) return true;
+    const m = state.room.match;
+    return Boolean(m && state.room.phase === 'game' && !G.isOver(m) && !(m.alive && m.alive[state.pid]));
+  }
+
+  function sendCheer(kind) {
+    if (!canCheer()) return;
+    const t = Date.now();
+    if (t - state.lastCheerAt < 900) return;
+    state.lastCheerAt = t;
+    state.store.set(roomPath('cheers/' + state.pid), { k: kind, t: state.store.now(), n: myName() }).catch(function (e) { console.error(e); });
   }
 
   // ---------- 部屋の購読 ----------
@@ -632,6 +807,8 @@
     state.room = null;
     state.roomLoaded = false;
     state.animKey = null;
+    state.cheerSeen = {};
+    state.cheerInit = false;
     state.unsub = state.store.on('rooms/' + code, function (room) {
       if (state.code !== code) return;
       onRoom(room);
@@ -642,9 +819,11 @@
     state.room = room || null;
     state.roomLoaded = true;
     const meIn = Boolean(room && room.players && room.players[state.pid] && room.players[state.pid].name);
-    if (meIn) {
-      if (!state.member) state.animKey = null;
-      state.member = true;
+    const meWatch = !meIn && Boolean(room && room.watchers && room.watchers[state.pid]);
+    if (meIn || meWatch) {
+      if (!state.member && !state.watching) state.animKey = null;
+      state.member = meIn;
+      state.watching = meWatch;
       state.invite = null;
       state.error = '';
       state.notice = '';
@@ -653,10 +832,11 @@
         state.presenceFor = state.code;
       }
       keepAwake(true);
-    } else if (state.member) {
+    } else if (state.member || state.watching) {
       leaveLocal(room ? '部屋から外されました。' : 'この部屋は終了しました。');
       return;
     }
+    processCheers(room);
     autoProgress();
     render();
   }
@@ -673,6 +853,7 @@
     if (state.presenceFor) state.store.stopPresence();
     state.presenceFor = null;
     state.member = false;
+    state.watching = false;
     state.code = null;
     state.room = null;
     state.roomLoaded = false;
@@ -706,21 +887,34 @@
     }
   }
 
+  function saveName(n) {
+    state.name = n;
+    state.form.name = n;
+    kvSet('redout:name', n);
+    try { longStore.setItem('redout:name', n); } catch (e) { /* 保存できなくても続行 */ }
+  }
+
   function takeName() {
     const raw = state.form.name != null ? state.form.name : state.name;
     const n = String(raw || '').trim().slice(0, 12);
     if (!n) {
       state.error = '名前を入力してください。';
+      toast('名前を入力してください。');
       render();
       const el = document.getElementById('name');
       if (el) el.focus();
       return null;
     }
-    state.name = n;
-    state.form.name = n;
-    kvSet('redout:name', n);
-    try { longStore.setItem('redout:name', n); } catch (e) { /* 保存できなくても続行 */ }
+    saveName(n);
     state.error = '';
+    return n;
+  }
+
+  // 観戦用：名前は空でもよい
+  function optionalName() {
+    const raw = state.form.name != null ? state.form.name : state.name;
+    const n = String(raw || '').trim().slice(0, 12);
+    if (n) saveName(n);
     return n;
   }
 
@@ -767,18 +961,76 @@
       if (playersOf(room).length >= clampTarget(room.target)) { reason = 'full'; return; }
       ps[state.pid] = { name: name, joinedAt: now };
       room.players = ps;
+      if (room.watchers) delete room.watchers[state.pid];
       return room;
     });
     if (!res.committed || !res.value) {
       state.error = {
         notfound: '部屋 ' + code + ' は見つかりませんでした。コードを確認してください。',
-        playing: 'この部屋は対戦中です。ホストがロビーに戻すと参加できます。',
-        full: 'この部屋は満員です。ホストに人数を増やしてもらってください。',
+        playing: 'この部屋は対戦中です。「観戦する」から観戦できます。',
+        full: 'この部屋は満員です。「観戦する」から観戦できます。',
       }[reason || 'notfound'];
       if (state.invite !== code) state.invite = null;
       return;
     }
     enterRoom(code);
+  }
+
+  async function watchRoomAs(raw) {
+    const code = normCode(raw);
+    if (!code) {
+      state.error = '部屋コード（英数字5文字）を入力してください。';
+      return;
+    }
+    const name = optionalName();
+    const now = state.store.now();
+    const res = await state.store.transaction('rooms/' + code, function (room) {
+      if (!room) return null;
+      if (room.players && room.players[state.pid] && room.players[state.pid].name) return room; // すでに対戦メンバーならそのまま
+      room.watchers = room.watchers || {};
+      const prev = room.watchers[state.pid] || {};
+      room.watchers[state.pid] = { name: name || prev.name || '', joinedAt: prev.joinedAt || now };
+      return room;
+    });
+    if (!res.committed || !res.value) {
+      state.error = '部屋 ' + code + ' は見つかりませんでした。コードを確認してください。';
+      if (state.invite !== code) state.invite = null;
+      return;
+    }
+    enterRoom(code);
+  }
+
+  // 観戦中にロビーの空席へ入る
+  async function sitDown() {
+    const name = myName() || takeName();
+    if (!name) return;
+    const now = state.store.now();
+    let reason = null;
+    const res = await state.store.transaction(roomPath(), function (r) {
+      reason = null;
+      if (!r) return r;
+      if (r.phase !== 'lobby') { reason = 'playing'; return; }
+      if (playersOf(r).length >= clampTarget(r.target)) { reason = 'full'; return; }
+      r.players = r.players || {};
+      r.players[state.pid] = { name: name, joinedAt: now };
+      if (r.watchers) delete r.watchers[state.pid];
+      return r;
+    });
+    if (!res.committed) toast(reason === 'full' ? '満員になりました。' : '対戦が始まりました。次の試合から参加できます。');
+  }
+
+  async function optIn() {
+    const name = myName() || takeName();
+    if (!name) return;
+    await state.store.update(roomPath('watchers/' + state.pid), { name: name, wantsIn: true });
+  }
+
+  async function optOut() {
+    await state.store.set(roomPath('watchers/' + state.pid + '/wantsIn'), null);
+  }
+
+  async function setSitOut(on) {
+    await state.store.set(roomPath('players/' + state.pid + '/sitOut'), on ? true : null);
   }
 
   async function setTarget(n) {
@@ -800,6 +1052,10 @@
     });
   }
 
+  function clearSitOut(r) {
+    Object.keys(r.players || {}).forEach(function (id) { if (r.players[id]) delete r.players[id].sitOut; });
+  }
+
   async function startGame() {
     const now = state.store.now();
     let reason = null;
@@ -809,6 +1065,7 @@
       if (r.phase !== 'lobby') return;
       const ps = playersOf(r);
       if (ps.length < MIN_PLAYERS || ps.length !== clampTarget(r.target)) { reason = 'count'; return; }
+      clearSitOut(r);
       r.matchCount = (r.matchCount || 0) + 1;
       r.match = G.newMatch(r.matchCount, ps.map(function (p) { return { pid: p.pid, name: p.name }; }), now);
       r.phase = 'game';
@@ -817,19 +1074,34 @@
     if (reason === 'count') toast('人数がそろっていません。');
   }
 
+  // 次の試合：観戦にまわる人と参加する観戦者を入れ替えてから始める
   async function nextMatch(matchId) {
     const now = state.store.now();
     let reason = null;
     await state.store.transaction(roomPath(), function (r) {
       reason = null;
       if (!r || r.phase !== 'game' || !r.match || !G.isOver(r.match) || r.match.id !== matchId) return;
-      const ps = playersOf(r);
-      if (ps.length < MIN_PLAYERS) { reason = 'few'; return; }
+      const lu = nextLineup(r);
+      if (lu.lineup.length < MIN_PLAYERS) { reason = 'few'; return; }
+      r.watchers = r.watchers || {};
+      lu.leaving.forEach(function (p) {
+        delete r.players[p.pid];
+        r.watchers[p.pid] = { name: p.name, joinedAt: now };
+      });
+      lu.joining.forEach(function (w, i) {
+        if (!lu.lineup.some(function (x) { return x.pid === w.pid; })) return; // 8人を超えた分は次回へ
+        delete r.watchers[w.pid];
+        r.players = r.players || {};
+        r.players[w.pid] = { name: w.name, joinedAt: now + i + 1 };
+      });
+      clearSitOut(r);
+      if (!r.players || !r.players[r.hostId]) { const ps = playersOf(r); r.hostId = ps.length ? ps[0].pid : null; }
+      r.target = clampTarget(lu.lineup.length);
       r.matchCount = Math.max(r.matchCount || 0, r.match.id) + 1;
-      r.match = G.newMatch(r.matchCount, ps.map(function (p) { return { pid: p.pid, name: p.name }; }), now);
+      r.match = G.newMatch(r.matchCount, lu.lineup.map(function (p) { return { pid: p.pid, name: p.name }; }), now);
       return r;
     });
-    if (reason === 'few') toast('対戦相手がいません。ロビーで次の人を待ちましょう。', 3500);
+    if (reason === 'few') toast('次の試合に出る人が2人以上必要です。', 3500);
   }
 
   async function backToLobby() {
@@ -837,6 +1109,7 @@
       if (!r) return r;
       r.phase = 'lobby';
       r.match = null;
+      clearSitOut(r);
       const count = playersOf(r).length;
       if (clampTarget(r.target) < count) r.target = clampTarget(count);
       return r;
@@ -872,8 +1145,10 @@
   async function leaveRoom() {
     const room = state.room;
     const m = room && room.match;
-    const inPlay = room && room.phase === 'game' && m && !G.isOver(m) && m.alive && m.alive[state.pid];
-    if (!confirm('部屋から退出しますか？' + (inPlay ? '\n対戦中の試合は脱落になります。' : ''))) return;
+    const watching = state.watching;
+    const inPlay = !watching && room && room.phase === 'game' && m && !G.isOver(m) && m.alive && m.alive[state.pid];
+    const question = watching ? '観戦をやめて部屋から出ますか？' : '部屋から退出しますか？' + (inPlay ? '\n対戦中の試合は脱落になります。' : '');
+    if (!confirm(question)) return;
     closeSheet();
     const code = state.code;
     const pid = state.pid;
@@ -881,14 +1156,18 @@
     if (state.unsub) state.unsub();
     state.unsub = null;
     state.member = false;
+    state.watching = false;
     if (state.presenceFor) await state.store.stopPresence();
     state.presenceFor = null;
     await state.store.transaction('rooms/' + code, function (r) {
       if (!r) return r;
       if (r.players) delete r.players[pid];
+      if (r.watchers) delete r.watchers[pid];
       if (r.presence) delete r.presence[pid];
+      if (r.cheers) delete r.cheers[pid];
       const ps = playersOf(r);
-      if (!ps.length) return null; // 最後の1人が出たら部屋を片付ける
+      if (!ps.length && !watchersOf(r).length) return null; // 誰もいなくなったら部屋を片付ける
+      if (!ps.length) { r.phase = 'lobby'; r.match = null; r.hostId = null; return r; }
       if (r.hostId === pid) r.hostId = ps[0].pid;
       return r;
     });
@@ -917,7 +1196,7 @@
   // ---------- 自動進行（公開と勝負の解決） ----------
   function autoProgress() {
     const room = state.room;
-    if (!state.member || !room || room.phase !== 'game') return;
+    if (!inRoom() || room.phase !== 'game') return;
     const m = room.match;
     if (!m || G.isOver(m)) return;
     const T = m.turn;
@@ -941,7 +1220,8 @@
       return;
     }
 
-    if (alive.every(function (p) { return reveals[p]; })) resolveTurn(m, T, alive, commits, reveals);
+    // 勝負の解決はプレイヤーの端末が行う（観戦者は見るだけ）
+    if (state.member && alive.every(function (p) { return reveals[p]; })) resolveTurn(m, T, alive, commits, reveals);
   }
 
   async function resolveTurn(m, T, alive, commits, reveals) {
@@ -992,6 +1272,11 @@
       case 'start': run(startGame); break;
       case 'next': run(function () { return nextMatch(Number(el.dataset.match)); }); break;
       case 'lobby': run(backToLobby); break;
+      case 'sit-out': run(function () { return setSitOut(el.dataset.on === '1'); }); break;
+      case 'opt-out': run(optOut); break;
+      case 'watch-invite': run(function () { return watchRoomAs(state.invite); }); break;
+      case 'watch-code': run(function () { return watchRoomAs(state.form.code); }); break;
+      case 'cheer': sendCheer(el.dataset.kind); break;
       case 'pick': {
         const c = el.dataset.card;
         state.selected = state.selected === c ? null : c;
@@ -1040,11 +1325,17 @@
     const kind = e.target.dataset.form;
     if (kind === 'create') run(createRoom);
     if (kind === 'join') run(function () { return joinRoom(state.form.code); });
-    if (kind === 'invite') run(function () { return joinRoom(state.invite); });
+    if (kind === 'invite') {
+      const room = state.room;
+      const canPlay = room && room.phase === 'lobby' && playersOf(room).length < clampTarget(room.target);
+      run(function () { return canPlay ? joinRoom(state.invite) : watchRoomAs(state.invite); });
+    }
+    if (kind === 'sit') run(sitDown);
+    if (kind === 'opt-in') run(optIn);
   });
 
   document.addEventListener('visibilitychange', function () {
-    if (document.visibilityState === 'visible' && state.member) keepAwake(true);
+    if (document.visibilityState === 'visible' && (state.member || state.watching)) keepAwake(true);
   });
 
   // 公開演出のあいだに状態が変わらなくても、演出が終わったら印などを確定表示にする
