@@ -227,6 +227,15 @@ button { cursor: pointer; }
   font-weight: 700;
 }
 .room-chip b { font-family: var(--mincho); letter-spacing: 0.12em; margin-left: 4px; }
+/* 上部バーは1行に収める（本番フォントは幅が広いので詰める） */
+.topbar { gap: 2px; padding-right: 8px; }
+.topbar .brand { font-size: 17px; letter-spacing: 0.05em; white-space: nowrap; }
+.topbar .room-chip { white-space: nowrap; padding: 0 10px; flex: none; }
+.topbar .btn-text { white-space: nowrap; padding: 0 7px; font-size: 14px; flex: none; }
+@media (max-width: 359px) {
+  .topbar .brand { display: none; }
+  .topbar .room-chip { margin-right: auto; }
+}
 
 /* ---------- ロビー ---------- */
 .lobby { padding: 4px 16px 16px; flex: 1; }
