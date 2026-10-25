@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>RED OUT</title>
+  <meta name="description" content="5枚の札で読み合う、ドクロのじゃんけん。友だちとスマホでオンライン対戦。">
+  <meta name="theme-color" content="#3a1512">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="RED OUT">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Shippori+Mincho+B1:wght@700;800&family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- ドクロの図柄（全カードで共有） -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="skull" viewBox="0 0 24 24">
+      <path fill-rule="evenodd" d="M12 2.5C6.9 2.5 3.5 6 3.5 10.6c0 2.6 1.2 4.7 3 5.9v2.7c0 .9.7 1.5 1.5 1.5h8c.8 0 1.5-.6 1.5-1.5v-2.7c1.8-1.2 3-3.3 3-5.9C20.5 6 17.1 2.5 12 2.5ZM6.5 11a2.1 2.1 0 1 0 4.2 0 2.1 2.1 0 1 0-4.2 0Zm6.8 0a2.1 2.1 0 1 0 4.2 0 2.1 2.1 0 1 0-4.2 0ZM12 13.6l-1.2 2.1h2.4L12 13.6Zm-2.4 4.4h.9v2.7h-.9V18Zm1.95 0h.9v2.7h-.9V18Zm1.95 0h.9v2.7h-.9V18Z"/>
+    </symbol>
+  </svg>
+
+  <main id="app" aria-live="polite">
+    <p class="boot">読み込み中…</p>
+  </main>
+
+  <dialog id="sheet" class="sheet" aria-labelledby="sheet-title">
+    <div class="sheet-body" id="sheet-body"></div>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <script src="firebase-config.js"></script>
+  <script src="game.js"></script>
+  <script src="store.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

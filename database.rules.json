@@ -1,0 +1,12 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "rooms": {
+      "$room": {
+        ".read": "$room.matches(/^[A-Z0-9]{5}$/)",
+        ".write": "$room.matches(/^[A-Z0-9]{5}$/)"
+      }
+    }
+  }
+}
