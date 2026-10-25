@@ -6,6 +6,8 @@
   <title>RED OUT</title>
   <meta name="description" content="5枚の札で読み合う、ドクロのじゃんけん。友だちとスマホでオンライン対戦。">
   <meta name="theme-color" content="#3a1512">
+  <!-- 版番号：更新のたびに version.json と一緒に上げる。古い版の端末は自動で読み込み直す -->
+  <meta name="app-version" content="3">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -16,7 +18,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Shippori+Mincho+B1:wght@700;800&family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=3">
 </head>
 <body>
   <!-- ドクロの図柄（全カードで共有） -->
@@ -36,9 +38,9 @@
 
   <div id="toast" class="toast" role="status" hidden></div>
 
-  <script src="firebase-config.js"></script>
-  <script src="game.js"></script>
-  <script src="store.js"></script>
-  <script src="app.js"></script>
+  <script src="firebase-config.js?v=3"></script>
+  <script src="game.js?v=3"></script>
+  <script src="store.js?v=3"></script>
+  <script src="app.js?v=3"></script>
 </body>
 </html>

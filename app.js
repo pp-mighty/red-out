@@ -33,11 +33,13 @@
   const HEX = '0123456789abcdef';
   const REVEAL_MS = 1300;
   const CHEERS = [
-    { k: 'clap', label: '拍手', tone: 'kin' },
-    { k: 'nice', label: '見事', tone: 'kin' },
-    { k: 'wow', label: 'まさか', tone: 'shu' },
-    { k: 'close', label: '惜しい', tone: 'shu' },
+    { k: 'clap', e: '👏', label: '拍手' },
+    { k: 'fire', e: '🔥', label: '熱い' },
+    { k: 'wow', e: '😱', label: 'びっくり' },
+    { k: 'sad', e: '😢', label: '惜しい' },
+    { k: 'party', e: '🎉', label: 'おめでとう' },
   ];
+  const APP_VERSION = (document.querySelector('meta[name="app-version"]') || {}).content || 'dev';
 
   const state = {
     store: null,
@@ -69,6 +71,8 @@
     cheerSeen: {},
     cheerInit: false,
     lastCheerAt: 0,
+    updateAvailable: false,
+    latestVersion: null,
   };
 
   // ---------- 小さな道具 ----------
@@ -310,7 +314,7 @@
 
   function cheerBarHtml() {
     return '<div class="cheer-bar" role="group" aria-label="応援スタンプ">' + CHEERS.map(function (c) {
-      return '<button class="cheer-btn cheer--' + c.tone + '" data-action="cheer" data-kind="' + c.k + '">' + c.label + '</button>';
+      return '<button class="cheer-btn" data-action="cheer" data-kind="' + c.k + '" aria-label="' + c.label + '"><span aria-hidden="true">' + c.e + '</span></button>';
     }).join('') + '</div>';
   }
 
@@ -731,6 +735,10 @@
     } else {
       html = renderHome();
     }
+    if (state.updateAvailable) {
+      html = '<div class="update-bar" role="status"><span>新しいバージョンがあります</span>' +
+        '<button class="btn btn-small" data-action="reload">更新する</button></div>' + html;
+    }
     if (html !== state.lastHtml) {
       const f = captureFocus();
       app.innerHTML = html;
@@ -751,14 +759,14 @@
     const def = CHEERS.find(function (x) { return x.k === c.k; });
     if (!def) return;
     const el = document.createElement('div');
-    el.className = 'cheer cheer--' + def.tone;
+    el.className = 'cheer';
     // 札や結果に重ならないよう、画面の左右の端から浮かび上がらせる
     el.style.left = (Math.random() < 0.5 ? 3 + Math.random() * 15 : 66 + Math.random() * 13) + '%';
     el.style.setProperty('--rot', (Math.random() * 24 - 12).toFixed(1) + 'deg');
-    const seal = document.createElement('span');
-    seal.className = 'seal';
-    seal.textContent = def.label;
-    el.appendChild(seal);
+    const emoji = document.createElement('span');
+    emoji.className = 'emoji';
+    emoji.textContent = def.e;
+    el.appendChild(emoji);
     if (c.n) {
       const by = document.createElement('span');
       by.className = 'by';
@@ -1277,6 +1285,7 @@
       case 'watch-invite': run(function () { return watchRoomAs(state.invite); }); break;
       case 'watch-code': run(function () { return watchRoomAs(state.form.code); }); break;
       case 'cheer': sendCheer(el.dataset.kind); break;
+      case 'reload': reloadToLatest(); break;
       case 'pick': {
         const c = el.dataset.card;
         state.selected = state.selected === c ? null : c;
@@ -1335,8 +1344,42 @@
   });
 
   document.addEventListener('visibilitychange', function () {
-    if (document.visibilityState === 'visible' && (state.member || state.watching)) keepAwake(true);
+    if (document.visibilityState !== 'visible') return;
+    if (state.member || state.watching) keepAwake(true);
+    checkUpdate();
   });
+
+  // ---------- 新しい版の確認 ----------
+  // GitHub Pages はファイルを10分ほどキャッシュさせるため、古い版のまま遊ぶ端末が出ないようにする。
+  // version.json がこの版と違えば、対戦中でなければ自動で読み込み直し、対戦中なら上にお知らせを出す。
+  function inActiveMatch() {
+    const r = state.room;
+    const m = r && r.match;
+    return Boolean(inRoom() && r.phase === 'game' && m && !G.isOver(m) && m.alive && m.alive[state.pid]);
+  }
+
+  function reloadToLatest() {
+    try { sessionStorage.setItem('redout:reloadTried', state.latestVersion || ''); } catch (e) { /* 無視 */ }
+    const q = new URLSearchParams(location.search);
+    q.set('v', state.latestVersion || String(Date.now()));
+    location.replace(location.pathname + '?' + q.toString());
+  }
+
+  async function checkUpdate() {
+    if (location.protocol === 'file:' || APP_VERSION === 'dev') return;
+    try {
+      const r = await fetch('version.json?ts=' + Date.now(), { cache: 'no-store' });
+      if (!r.ok) return;
+      const j = await r.json();
+      if (!j || !j.v || String(j.v) === APP_VERSION) return;
+      state.latestVersion = String(j.v);
+      let tried = null;
+      try { tried = sessionStorage.getItem('redout:reloadTried'); } catch (e) { /* 無視 */ }
+      if (!inActiveMatch() && tried !== state.latestVersion) { reloadToLatest(); return; }
+      if (!state.updateAvailable) { state.updateAvailable = true; render(); }
+    } catch (e) { /* オフラインなど。次の確認で再試行 */ }
+  }
+  setInterval(checkUpdate, 90 * 1000);
 
   // 公開演出のあいだに状態が変わらなくても、演出が終わったら印などを確定表示にする
   setInterval(function () {
@@ -1366,12 +1409,18 @@
     state.pid = pid;
     state.name = kvGet('redout:name') || longStore.getItem('redout:name') || '';
 
-    const code = normCode(new URLSearchParams(location.search).get('room'));
+    const params = new URLSearchParams(location.search);
+    if (params.has('v')) {
+      params.delete('v');
+      try { history.replaceState(null, '', location.pathname + (params.toString() ? '?' + params.toString() : '')); } catch (e) { /* 無視 */ }
+    }
+    const code = normCode(params.get('room'));
     if (code) {
       state.invite = code;
       watchRoom(code);
     }
     render();
+    checkUpdate();
   }
 
   init();
