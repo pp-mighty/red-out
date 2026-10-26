@@ -6,11 +6,11 @@
  * データの読み書きは database.rules.json のルールで制限します。
  */
 window.FIREBASE_CONFIG = {
-  apiKey: '',
-  authDomain: '',
-  databaseURL: '',
-  projectId: '',
-  storageBucket: '',
-  messagingSenderId: '',
-  appId: '',
+  apiKey: 'AIzaSyAHASQRCZpagtMMAOL1gT1y_aTLkdkhLUo',
+  authDomain: 'redout-online.firebaseapp.com',
+  databaseURL: 'https://redout-online-default-rtdb.asia-southeast1.firebasedatabase.app',
+  projectId: 'redout-online',
+  storageBucket: 'redout-online.firebasestorage.app',
+  messagingSenderId: '1052031581950',
+  appId: '1:1052031581950:web:78689e032d62f8baeaefaf',
 };
