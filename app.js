@@ -2,14 +2,14 @@
  * RED OUT — 画面と進行
  * データの形（Firebase / テストモード共通）:
  * rooms/{CODE} = {
- *   createdAt, hostId, target(対戦人数), phase('lobby'|'game'), matchCount,
+ *   createdAt, hostId, target(対戦人数＝2), phase('lobby'|'game'), matchCount,
  *   players:  { pid: { name, joinedAt, sitOut? } },   // 対戦する人（sitOut = 次は観戦にまわる）
  *   watchers: { pid: { name, joinedAt, wantsIn? } },  // 観戦する人（名前は空でもよい。wantsIn = 次の試合に参加）
  *   presence: { pid: true|false },                    // 接続中かどうか
  *   scores:   { pid: 勝ち数 },
  *   cheers:   { pid: { k, t, n } },                   // 応援スタンプ（1人1枠を上書き）
  *   match: {                                          // 進行中または直前の試合
- *     id, turn, order[], names{}, alive{}, hands{},
+ *     id, turn, order[], names{}, colors{ pid: 'black'|'white' }, alive{}, hands{ pid: { R, S, P } },
  *     commits: { t1: { pid: SHA-256 } },              // 伏せた札（ハッシュだけ）
  *     reveals: { t1: { pid: { card, salt } } },       // 全員そろったら公開
  *     log: {...}, last, winner, rematches
@@ -26,7 +26,7 @@
   const toastEl = document.getElementById('toast');
 
   const MIN_PLAYERS = 2;
-  const MAX_PLAYERS = 8;
+  const MAX_PLAYERS = 2; // 対戦は2人。観戦は何人でも
   const CODE_LEN = 5;
   const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   const ID_CHARS = 'abcdefghijkmnpqrstuvwxyz23456789';
@@ -235,65 +235,80 @@
   }
 
   // ---------- 札の見た目 ----------
-  function cardHtml(card, extra) {
-    const info = G.CARD_INFO[card];
-    const inner = info.skull
-      ? '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#skull"/></svg>'
-      : '<span class="kanji" aria-hidden="true">' + info.name + '</span>';
-    return '<span class="card card--' + info.tone + (extra ? ' ' + extra : '') + '" role="img" aria-label="' + info.name + '">' + inner + '</span>';
+  // type: R（赤ドクロ）/ S（色ドクロ）/ P（無印）、color: 'black' | 'white'
+  function cardHtml(type, color, extra) {
+    const skull = G.TYPE_INFO[type].skull;
+    const inner = skull ? '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#skull"/></svg>' : '';
+    return '<span class="card card--' + G.cardTone(type, color) + (skull ? '' : ' card--plain') + (extra ? ' ' + extra : '') +
+      '" role="img" aria-label="' + G.cardName(type, color) + '">' + inner + '</span>';
+  }
+  function colorOf(m, pid) {
+    return (m && m.colors && m.colors[pid]) || 'black';
   }
   function backHtml() { return '<span class="card card--back" aria-hidden="true"></span>'; }
   function slotHtml() { return '<span class="card card--slot" aria-hidden="true"></span>'; }
-  function pipHtml(card, used) {
-    const info = G.CARD_INFO[card];
-    return '<span class="pip card--' + info.tone + (used ? ' is-used' : '') + '" aria-hidden="true">' +
-      (info.skull ? '<svg viewBox="0 0 24 24"><use href="#skull"/></svg>' : '') + '</span>';
+  function pipHtml(type, color, used) {
+    return '<span class="pip card--' + G.cardTone(type, color) + (used ? ' is-used' : '') + '" aria-hidden="true">' +
+      (G.TYPE_INFO[type].skull ? '<svg viewBox="0 0 24 24"><use href="#skull"/></svg>' : '') + '</span>';
   }
-  function pipsHtml(hand) {
-    const left = G.handList(hand).map(function (c) { return G.CARD_INFO[c].name; });
+  function pipsHtml(hand, color) {
+    const left = G.handList(hand).map(function (c) { return G.cardName(c, color); });
     return '<span class="pips" role="img" aria-label="残りの札：' + (left.join('、') || 'なし') + '">' +
-      G.CARDS.map(function (c) { return pipHtml(c, !(hand && hand[c])); }).join('') + '</span>';
+      G.CARDS.map(function (c) { return pipHtml(c, color, !(hand && hand[c])); }).join('') + '</span>';
   }
 
   // ---------- 文章 ----------
   function describe(m, e) {
     if (!e) return '';
-    if (e.kind === 'forfeit') return who(m, e.pid) + 'は退出したため脱落しました。';
+    if (e.kind === 'forfeit') return who(m, e.pid) + 'が退出したため、決着しました。';
+    const name = function (pid) { return who(m, pid) + 'の' + G.cardName(e.plays[pid], colorOf(m, pid)); };
     const parts = [];
     G.asArray(e.eliminated).forEach(function (p) {
-      const by = G.asArray(e.beatenBy && e.beatenBy[p]).map(function (q) {
-        return who(m, q) + 'の' + G.CARD_INFO[e.plays[q]].name;
-      });
-      parts.push(who(m, p) + 'は' + by.join('と') + 'に負けて脱落。');
+      const by = G.asArray(e.beatenBy && e.beatenBy[p]);
+      parts.push(by.map(name).join('と') + 'が、' + name(p) + 'に勝ちました。');
     });
     G.asArray(e.fouls).forEach(function (p) {
       parts.push(who(m, p) + 'は札の確認が取れず反則負け。');
     });
-    if (!parts.length) parts.push('勝負つかず。出した札は捨て札になります。');
-    if (e.rematch) parts.push('全員の札が尽きたので、手札を戻して再戦します。');
+    if (!parts.length) {
+      const types = Object.keys(e.plays || {}).map(function (pid) { return e.plays[pid]; });
+      const kind = types[0] === 'R' ? '赤ドクロ' : (types[0] === 'S' ? 'ドクロ' : '無印');
+      parts.push(kind + '同士で引き分け。出した札は捨て札になります。');
+    }
+    if (e.rematch) parts.push('どちらも札が尽きたので、手札を戻して再戦します。');
     return parts.join('');
   }
 
   function rulesHtml() {
-    const beat = function (a, bs) {
-      return '<div class="beat">' + cardHtml(a) + '<span>は</span>' + bs.map(function (b) { return cardHtml(b); }).join('') +
-        '<span class="gt">に勝つ</span></div>';
+    const cards = function (list) { return list.map(function (c) { return cardHtml(c[0], c[1]); }).join(''); };
+    const beat = function (a, b, label) {
+      return '<div class="beat">' + cards(a) + '<span>は</span>' + cards(b) + '<span class="gt">に勝つ</span>' +
+        '<span class="beat-note">' + label + '</span></div>';
     };
     return '' +
-      '<h3>強さ</h3>' +
-      '<div class="beat-chart">' + beat('RS', ['BS', 'WS']) + beat('BS', ['B']) + beat('WS', ['W']) + '</div>' +
-      '<p>それ以外の組み合わせは、すべて引き分けです。</p>' +
+      '<h3>手札</h3>' +
+      '<p>2人で対戦します。1人が黒、もう1人が白の札を3枚ずつ持ちます。</p>' +
+      '<div class="beat-chart">' +
+      '<div class="beat">' + cards([['R', 'black'], ['S', 'black'], ['P', 'black']]) + '<span class="beat-note">黒の手札</span></div>' +
+      '<div class="beat">' + cards([['R', 'white'], ['S', 'white'], ['P', 'white']]) + '<span class="beat-note">白の手札</span></div>' +
+      '</div>' +
+      '<h3>強さ（三すくみ）</h3>' +
+      '<div class="beat-chart">' +
+      beat([['R', 'black']], [['S', 'black'], ['S', 'white']], '赤ドクロ ＞ ドクロ') +
+      beat([['S', 'black'], ['S', 'white']], [['P', 'white'], ['P', 'black']], 'ドクロ ＞ 無印') +
+      beat([['P', 'black'], ['P', 'white']], [['R', 'black']], '無印 ＞ 赤ドクロ') +
+      '</div>' +
+      '<p>色は関係ありません。同じ種類どうし（赤ドクロ同士、ドクロ同士、無印同士）は引き分けです。</p>' +
       '<h3>流れ</h3>' +
       '<ul>' +
-      '<li>全員が同じ5枚（黒・白・黒ドクロ・白ドクロ・赤ドクロ）を持って始めます。</li>' +
-      '<li>1枚ずつ伏せて出し、全員そろったら一斉に公開します。</li>' +
-      '<li>誰か1人にでも負けた人は脱落です。</li>' +
-      '<li>出した札は、勝っても引き分けでも捨て札になります。</li>' +
-      '<li>最後の1人になった人の勝ちです。</li>' +
-      '<li>生き残った全員が5枚を使い切ったら、手札を戻して再戦します。</li>' +
+      '<li>1枚ずつ伏せて出し、2人そろったら一斉に公開します。</li>' +
+      '<li>勝った人がその試合の勝ちです。</li>' +
+      '<li>引き分けなら、出した札は捨て札になって次の勝負へ進みます。</li>' +
+      '<li>3回とも引き分けで札が尽きたら、手札を戻して再戦します。</li>' +
+      '<li>同じ2人で続けるときは、試合ごとに黒と白が入れ替わります。</li>' +
       '</ul>' +
       '<h3>読み合いのコツ</h3>' +
-      '<p>相手が使った札は、席の小さな札で薄く表示されます。残りの札から、相手が次に出せるものを読みましょう。</p>' +
+      '<p>相手が使った札は、席の小さな札で薄く表示されます。引き分けが続くほど、相手の残りの札が絞られていきます。</p>' +
       '<h3>観戦</h3>' +
       '<p>招待リンクから「観戦する」を選ぶと、名前なしでも観戦できます。伏せた札は観戦者にも公開まで見えません。試合が終わったら「次の試合に参加する」で対戦に加われます。</p>';
   }
@@ -331,23 +346,17 @@
   }
 
   function renderHome() {
-    const fanOrder = [['B', -26, 22], ['BS', -13, 6], ['RS', 0, 0], ['WS', 13, 6], ['W', 26, 22]];
+    const fanOrder = [['P', 'black', -26, 22], ['S', 'black', -13, 6], ['R', 'black', 0, 0], ['S', 'white', 13, 6], ['P', 'white', 26, 22]];
     const fan = '<div class="fan' + (state.fanPlayed ? '' : ' is-opening') + '" aria-hidden="true">' +
       fanOrder.map(function (f, i) {
-        return cardHtml(f[0]).replace('class="card ', 'style="--r:' + f[1] + 'deg;--y:' + f[2] + 'px;--i:' + i + '" class="card ');
+        return cardHtml(f[0], f[1]).replace('class="card ', 'style="--r:' + f[2] + 'deg;--y:' + f[3] + 'px;--i:' + i + '" class="card ');
       }).join('') + '</div>';
     state.fanPlayed = true;
 
     const busy = state.busy ? ' disabled' : '';
-    const targetOptions = [];
-    for (let n = MIN_PLAYERS; n <= MAX_PLAYERS; n++) {
-      targetOptions.push('<option value="' + n + '"' + (state.form.target === n ? ' selected' : '') + '>' + n + '人で対戦</option>');
-    }
     const createForm =
-      '<form data-form="create" class="row" style="margin-top:14px">' +
-      '<div class="grow"><label class="label" for="target">対戦人数</label>' +
-      '<select class="select" id="target">' + targetOptions.join('') + '</select></div>' +
-      '<button class="btn btn-primary" type="submit"' + busy + '>部屋を作る</button></form>';
+      '<form data-form="create" style="margin-top:14px">' +
+      '<button class="btn btn-primary btn-block" type="submit"' + busy + '>部屋を作る</button></form>';
     const joinForm =
       '<form data-form="join" class="row">' +
       '<div class="grow"><label class="label" for="code">部屋コード</label>' +
@@ -395,7 +404,7 @@
       '<div class="home">' +
       fan +
       '<h1 class="title">RED OUT</h1>' +
-      '<p class="lede">5枚の札で読み合うドクロのじゃんけん。</p>' +
+      '<p class="lede">3枚の札で読み合うドクロのじゃんけん。</p>' +
       (state.notice ? '<p class="notice" role="status" style="margin:0 0 12px">' + esc(state.notice) + '</p>' : '') +
       panel +
       '<div class="home-foot"><button class="btn btn-text" data-action="open-rules">ルールを見る</button></div>' +
@@ -418,16 +427,6 @@
     const host = amHost();
     const hostId = hostPid(room);
 
-    let targetCtl;
-    if (host) {
-      const opts = [];
-      for (let n = Math.max(MIN_PLAYERS, ps.length); n <= MAX_PLAYERS; n++) {
-        opts.push('<option value="' + n + '"' + (n === target ? ' selected' : '') + '>' + n + '人</option>');
-      }
-      targetCtl = '<select class="select" id="lobby-target" aria-label="対戦人数">' + opts.join('') + '</select>';
-    } else {
-      targetCtl = '<p style="margin:0;font-size:17px;font-weight:700">' + target + '人</p>';
-    }
 
     const rows = ps.map(function (p) {
       const tags = [];
@@ -456,10 +455,10 @@
         bottom = '<p class="tray-note">満員です。観戦しながら、空きが出たら参加できます。</p>';
       }
     } else if (host) {
-      const label = need > 0 ? 'あと' + need + '人で始められます' : (need < 0 ? '人数を合わせてください' : '対戦を始める');
+      const label = need > 0 ? '対戦相手を待っています' : '対戦を始める';
       bottom = '<button class="btn btn-primary btn-block" data-action="start"' + (need !== 0 || state.busy ? ' disabled' : '') + '>' + label + '</button>';
     } else {
-      bottom = '<p class="tray-note">' + (need > 0 ? 'あと' + need + '人そろうと、ホストが始められます。' : 'ホストが対戦を始めるのを待っています。') + '</p>';
+      bottom = '<p class="tray-note">' + (need > 0 ? '対戦相手がそろうと、ホストが始められます。' : 'ホストが対戦を始めるのを待っています。') + '</p>';
     }
 
     return testmodeHtml() + topbarHtml() +
@@ -470,7 +469,7 @@
       '<button class="btn btn-ghost" data-action="share">招待リンクを送る</button>' +
       '</div>' +
       '<section class="panel">' +
-      '<div class="row" style="align-items:center;margin-bottom:6px"><span class="grow" style="font-weight:700">対戦人数</span><div style="width:130px">' + targetCtl + '</div></div>' +
+      '<h2 class="panel-title" style="margin-bottom:4px">対戦する2人</h2>' +
       '<ul class="seat-list">' + rows.join('') + '</ul>' +
       watchersLineHtml() +
       '</section>' +
@@ -479,7 +478,7 @@
   }
 
   function seatState(m, pid, allCommitted) {
-    if (!(m.alive && m.alive[pid])) return { text: '脱落', cls: 'is-out' };
+    if (!(m.alive && m.alive[pid])) return { text: '負け', cls: 'is-out' };
     if (G.isOver(m)) return m.winner === pid ? { text: '勝ち', done: true } : { text: '' };
     const tk = G.turnKey(m.turn);
     const committed = m.commits && m.commits[tk] && m.commits[tk][pid];
@@ -493,7 +492,7 @@
 
   function playHtml(m, pid, card, stamp) {
     return '<div class="play' + (pid === state.pid ? ' is-me' : '') + '">' +
-      '<div class="stack">' + backHtml() + cardHtml(card, 'face') +
+      '<div class="stack">' + backHtml() + cardHtml(card, colorOf(m, pid), 'face') +
       (stamp ? '<span class="stamp' + (stamp === '勝ち' ? ' stamp--win' : '') + '">' + stamp + '</span>' : '') +
       '</div><span class="play-name">' + esc(pid === state.pid ? 'あなた' : nameOf(m, pid)) + '</span></div>';
   }
@@ -501,8 +500,19 @@
   function lineupHtml() {
     const lu = nextLineup(state.room);
     if (!lu.joining.length && !lu.leaving.length) return '';
-    const names = lu.lineup.map(function (p) { return p.pid === state.pid ? 'あなた' : p.name; });
-    return '<p class="lineup">次の試合：' + esc(names.join('、')) + '</p>';
+    const nm = function (p) { return p.pid === state.pid ? 'あなた' : p.name; };
+    let html = '<p class="lineup">次の試合：' + esc(lu.lineup.map(nm).join('、')) + '</p>';
+    // 席が足りず、次の試合に入れない参加希望者がいるとき
+    const waiting = lu.joining.filter(function (w) { return !lu.lineup.some(function (x) { return x.pid === w.pid; }); });
+    if (waiting.length && !state.watching) {
+      html += '<p class="lineup lineup--wait">' + esc(waiting.map(function (w) { return w.name + 'さん'; }).join('、')) +
+        'が参加を待っています。代わる人は「次は観戦にまわる」を押してください。</p>';
+    }
+    return html;
+  }
+
+  function inNextLineup(pid) {
+    return nextLineup(state.room).lineup.some(function (p) { return p.pid === pid; });
   }
 
   function renderGame() {
@@ -525,12 +535,12 @@
     const seats = order.filter(function (p) { return p !== me; }).map(function (p) {
       const st = seatState(m, p, allCommitted);
       const forfeitBtn = host && !over && m.alive && m.alive[p] && !isOnline(p)
-        ? '<button class="btn btn-small btn-ghost" data-action="forfeit" data-pid="' + esc(p) + '">脱落扱い</button>' : '';
+        ? '<button class="btn btn-small btn-ghost" data-action="forfeit" data-pid="' + esc(p) + '">負け扱いにする</button>' : '';
       return '<div class="seat' + (st.cls ? ' ' + st.cls : '') + (st.done ? ' is-done' : '') + '">' +
         '<div class="seat-name">' + esc(nameOf(m, p)) + '</div>' +
         '<div class="seat-meta"><span class="' + (st.off ? 'state-off' : (st.done ? 'state-done' : '')) + '">' + st.text + '</span>' +
         '<span class="wins">★' + winsOf(p) + '</span></div>' +
-        pipsHtml(m.hands && m.hands[p]) + forfeitBtn + '</div>';
+        pipsHtml(m.hands && m.hands[p], colorOf(m, p)) + forfeitBtn + '</div>';
     }).join('');
 
     // 一斉公開の演出（新しい結果が届いたときだけ）
@@ -562,7 +572,7 @@
       if (final && final.kind === 'turn') {
         plays = '<div class="plays">' + order.filter(function (p) { return final.plays && final.plays[p]; }).map(function (p) {
           const out = G.asArray(final.eliminated).indexOf(p) !== -1 || G.asArray(final.fouls).indexOf(p) !== -1;
-          return playHtml(m, p, final.plays[p], p === winner ? '勝ち' : (out ? '脱落' : ''));
+          return playHtml(m, p, final.plays[p], p === winner ? '勝ち' : (out ? '負け' : ''));
         }).join('') + '</div>';
         caption = describe(m, final);
       } else if (final) {
@@ -575,7 +585,7 @@
       field = '<div class="field-head">ターン' + last.turn + 'の結果</div>' +
         '<div class="plays">' + order.filter(function (p) { return last.plays && last.plays[p]; }).map(function (p) {
           const out = G.asArray(last.eliminated).indexOf(p) !== -1 || G.asArray(last.fouls).indexOf(p) !== -1;
-          return playHtml(m, p, last.plays[p], out ? '脱落' : '');
+          return playHtml(m, p, last.plays[p], out ? '負け' : '');
         }).join('') + '</div>' +
         '<p class="caption">' + esc(describe(m, last)) + '</p>' +
         '<p class="caption-sub">ターン' + m.turn + '　' + progress + '</p>';
@@ -596,7 +606,8 @@
       let join = '';
       if (over) {
         if (meW.wantsIn) {
-          join = '<div class="row" style="align-items:center;margin-top:12px"><p class="tray-note grow" style="min-height:0">次の試合に参加します。</p>' +
+          const msg = inNextLineup(me) ? '次の試合に参加します。' : '席が空くのを待っています。対戦中の人が「次は観戦にまわる」を押すと交代します。';
+          join = '<div class="row" style="align-items:center;margin-top:12px"><p class="tray-note grow" style="min-height:0;text-align:left">' + msg + '</p>' +
             '<button class="btn btn-small btn-ghost" data-action="opt-out">取り消す</button></div>';
         } else {
           join = '<form data-form="opt-in" style="margin-top:12px">' + (meW.name ? '' : nameInputHtml('対戦に参加するには名前が必要です')) +
@@ -607,6 +618,7 @@
         cheerBarHtml() + (over ? lineupHtml() : '') + join;
     } else {
       const hand = (m.hands && m.hands[me]) || {};
+      const myColor = colorOf(m, me);
       const myCommit = commits[me];
       const secret = myCommit ? readSecret(m.id, m.turn) : null;
       const canPick = isAlive && !over && !myCommit;
@@ -617,7 +629,7 @@
         const sel = canPick && state.selected === c;
         return '<button class="hand-card' + (has ? '' : ' is-used') + (played ? ' is-played' : '') + '" data-action="pick" data-card="' + c + '"' +
           ' aria-pressed="' + sel + '"' + (canPick && has ? '' : ' disabled') + '>' +
-          cardHtml(c) + '<span class="card-name">' + G.CARD_INFO[c].name + '</span></button>';
+          cardHtml(c, myColor) + '<span class="card-name">' + G.cardName(c, myColor) + '</span></button>';
       }).join('');
 
       let action;
@@ -630,19 +642,19 @@
           (host ? '<button class="btn btn-ghost grow" data-action="lobby"' + (state.busy ? ' disabled' : '') + '>ロビーに戻る</button>' : '') +
           '</div></div>';
       } else if (!isAlive) {
-        action = '<p class="tray-note" style="min-height:0;margin-bottom:10px">脱落しました。決着まで観戦できます。</p>' + cheerBarHtml();
+        action = '<p class="tray-note" style="min-height:0;margin-bottom:10px">負けました。</p>' + cheerBarHtml();
       } else if (myCommit && !secret) {
         action = '<p class="tray-note">この端末には伏せた札の記録がありません。札を出した端末で開き直してください。</p>';
       } else if (myCommit) {
         action = '<p class="tray-note">' + (allCommitted ? '公開しています…' : '札を伏せました。全員そろうと公開されます。') + '</p>';
       } else {
         action = '<button class="btn btn-primary btn-block" data-action="commit"' + (state.selected && !state.busy ? '' : ' disabled') + '>' +
-          (state.selected ? G.CARD_INFO[state.selected].name + 'を出す' : '出す札を選んでください') + '</button>';
+          (state.selected ? G.cardName(state.selected, myColor) + 'を出す' : '出す札を選んでください') + '</button>';
       }
 
       tray = over
         ? '<div class="tray-head" style="margin-bottom:10px"><strong>通算</strong><span class="wins">あなたは★' + winsOf(me) + '勝</span></div>' + action
-        : '<div class="tray-head"><strong>あなたの手札</strong><span class="wins">★' + winsOf(me) + '勝</span></div>' +
+        : '<div class="tray-head"><strong>あなたの手札<span class="color-tag color-tag--' + myColor + '">' + G.colorName(myColor) + '</span></strong><span class="wins">★' + winsOf(me) + '勝</span></div>' +
           '<div class="hand">' + cards + '</div>' + action;
     }
 
@@ -673,7 +685,7 @@
       if (e.kind === 'forfeit') return '<li>' + esc(describe(m, e)) + '</li>';
       const plays = order.filter(function (p) { return e.plays && e.plays[p]; }).map(function (p) {
         const out = G.asArray(e.eliminated).indexOf(p) !== -1 || G.asArray(e.fouls).indexOf(p) !== -1;
-        return '<span class="log-play' + (out ? ' is-out' : '') + '">' + pipHtml(e.plays[p], false) + esc(p === state.pid ? 'あなた' : nameOf(m, p)) + '</span>';
+        return '<span class="log-play' + (out ? ' is-out' : '') + '">' + pipHtml(e.plays[p], colorOf(m, p), false) + esc(p === state.pid ? 'あなた' : nameOf(m, p)) + '</span>';
       }).join('');
       return '<li><strong>ターン' + e.turn + '</strong><div class="log-plays">' + plays + '</div>' +
         '<div style="margin-top:4px;color:var(--muted)">' + esc(describe(m, e)) + '</div></li>';
@@ -731,7 +743,7 @@
     if (!state.store) return;
     let html;
     if (inRoom()) {
-      html = state.room.phase === 'game' && state.room.match ? renderGame() : renderLobby();
+      html = state.room.phase === 'game' && G.isCurrentMatch(state.room.match) ? renderGame() : renderLobby();
     } else {
       html = renderHome();
     }
@@ -845,8 +857,26 @@
       return;
     }
     processCheers(room);
+    resetLegacy(room);
     autoProgress();
     render();
+  }
+
+  // 古い版のルールで作られた試合や、3人以上の席が残っている部屋を、この版で遊べる形に戻す
+  function resetLegacy(room) {
+    if (!state.member || !room) return;
+    const legacyMatch = room.phase === 'game' && !G.isCurrentMatch(room.match);
+    const legacyTarget = Number(room.target) !== MAX_PLAYERS;
+    if (!legacyMatch && !legacyTarget) return;
+    const key = 'legacy:' + state.code;
+    if (state.pending[key]) return;
+    state.pending[key] = true;
+    state.store.transaction(roomPath(), function (r) {
+      if (!r) return r;
+      if (r.phase === 'game' && !G.isCurrentMatch(r.match)) { r.phase = 'lobby'; r.match = null; }
+      r.target = MAX_PLAYERS;
+      return r;
+    }).catch(function (e) { console.error(e); }).then(function () { delete state.pending[key]; });
   }
 
   function enterRoom(code) {
@@ -929,7 +959,7 @@
   async function createRoom() {
     const name = takeName();
     if (!name) return;
-    const target = clampTarget(state.form.target);
+    const target = MAX_PLAYERS;
     let code = null;
     for (let i = 0; i < 8 && !code; i++) {
       const c = randomId(CODE_LEN, CODE_CHARS);
@@ -1041,13 +1071,6 @@
     await state.store.set(roomPath('players/' + state.pid + '/sitOut'), on ? true : null);
   }
 
-  async function setTarget(n) {
-    if (!amHost()) return;
-    const count = playersOf(state.room).length;
-    const t = Math.max(clampTarget(n), count, MIN_PLAYERS);
-    await state.store.set(roomPath('target'), t);
-  }
-
   async function kick(pid) {
     const p = state.room.players && state.room.players[pid];
     if (!p || !confirm(p.name + 'さんを部屋から外しますか？')) return;
@@ -1075,7 +1098,8 @@
       if (ps.length < MIN_PLAYERS || ps.length !== clampTarget(r.target)) { reason = 'count'; return; }
       clearSitOut(r);
       r.matchCount = (r.matchCount || 0) + 1;
-      r.match = G.newMatch(r.matchCount, ps.map(function (p) { return { pid: p.pid, name: p.name }; }), now);
+      const lineup = ps.map(function (p) { return { pid: p.pid, name: p.name }; });
+      r.match = G.newMatch(r.matchCount, lineup, now, G.assignColors(lineup, G.isCurrentMatch(r.match) ? r.match : null));
       r.phase = 'game';
       return r;
     });
@@ -1106,7 +1130,8 @@
       if (!r.players || !r.players[r.hostId]) { const ps = playersOf(r); r.hostId = ps.length ? ps[0].pid : null; }
       r.target = clampTarget(lu.lineup.length);
       r.matchCount = Math.max(r.matchCount || 0, r.match.id) + 1;
-      r.match = G.newMatch(r.matchCount, lu.lineup.map(function (p) { return { pid: p.pid, name: p.name }; }), now);
+      const lineup = lu.lineup.map(function (p) { return { pid: p.pid, name: p.name }; });
+      r.match = G.newMatch(r.matchCount, lineup, now, G.assignColors(lineup, G.isCurrentMatch(r.match) ? r.match : null));
       return r;
     });
     if (reason === 'few') toast('次の試合に出る人が2人以上必要です。', 3500);
@@ -1155,7 +1180,7 @@
     const m = room && room.match;
     const watching = state.watching;
     const inPlay = !watching && room && room.phase === 'game' && m && !G.isOver(m) && m.alive && m.alive[state.pid];
-    const question = watching ? '観戦をやめて部屋から出ますか？' : '部屋から退出しますか？' + (inPlay ? '\n対戦中の試合は脱落になります。' : '');
+    const question = watching ? '観戦をやめて部屋から出ますか？' : '部屋から退出しますか？' + (inPlay ? '\n対戦中の試合は負けになります。' : '');
     if (!confirm(question)) return;
     closeSheet();
     const code = state.code;
@@ -1274,7 +1299,7 @@
       case 'kick': run(function () { return kick(el.dataset.pid); }); break;
       case 'forfeit': {
         const m = state.room && state.room.match;
-        if (confirm(nameOf(m, el.dataset.pid) + 'さんを脱落扱いにしますか？')) run(function () { return forfeitPlayer(el.dataset.pid); });
+        if (confirm(nameOf(m, el.dataset.pid) + 'さんを負け扱いにしますか？')) run(function () { return forfeitPlayer(el.dataset.pid); });
         break;
       }
       case 'start': run(startGame); break;
@@ -1325,8 +1350,6 @@
   });
 
   app.addEventListener('change', function (e) {
-    if (e.target.id === 'target') state.form.target = clampTarget(e.target.value);
-    if (e.target.id === 'lobby-target') run(function () { return setTarget(Number(e.target.value)); });
   });
 
   app.addEventListener('submit', function (e) {

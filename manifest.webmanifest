@@ -1,7 +1,7 @@
 {
   "name": "RED OUT",
   "short_name": "RED OUT",
-  "description": "5枚の札で読み合う、ドクロのじゃんけん。",
+  "description": "3枚の札で読み合うドクロのじゃんけん。友だちとスマホでオンライン対戦。",
   "lang": "ja",
   "start_url": "./",
   "scope": "./",

@@ -1,36 +1,56 @@
 /*
  * RED OUT — ルール部分（画面や通信に依存しない純粋なロジック）
  * ブラウザでは window.RedOut、Node では module.exports として使えます。
+ *
+ * 2人対戦。片方が黒、もう片方が白の札を持つ。
+ *   黒の手札：赤ドクロ・黒ドクロ・黒無印
+ *   白の手札：赤ドクロ・白ドクロ・白無印
+ * 強さは三すくみ（色は関係なし）：
+ *   赤ドクロ ＞ 色ドクロ ＞ 無印 ＞ 赤ドクロ
+ * 同じ種類どうしは引き分け。
  */
 (function (root) {
   'use strict';
 
-  // 手札の並び順
-  const CARDS = ['B', 'W', 'BS', 'WS', 'RS'];
+  // 札の種類（手札の並び順）
+  const CARDS = ['R', 'S', 'P'];
+  const COLORS = ['black', 'white'];
 
-  const CARD_INFO = {
-    B: { name: '黒', tone: 'black', skull: false },
-    W: { name: '白', tone: 'white', skull: false },
-    BS: { name: '黒ドクロ', tone: 'black', skull: true },
-    WS: { name: '白ドクロ', tone: 'white', skull: true },
-    RS: { name: '赤ドクロ', tone: 'red', skull: true },
+  const TYPE_INFO = {
+    R: { name: '赤ドクロ', skull: true },
+    S: { name: 'ドクロ', skull: true },
+    P: { name: '無印', skull: false },
   };
 
-  // 左のカードが右のカードに勝つ組み合わせ。ここにないものはすべて引き分け。
+  // 左の種類が右の種類に勝つ（三すくみ）。同じ種類は引き分け。
   const BEATS = {
-    RS: ['BS', 'WS'],
-    BS: ['B'],
-    WS: ['W'],
-    B: [],
-    W: [],
+    R: ['S'],
+    S: ['P'],
+    P: ['R'],
   };
 
   function beats(a, b) {
     return Boolean(BEATS[a] && BEATS[a].indexOf(b) !== -1);
   }
 
+  function colorName(color) {
+    return color === 'white' ? '白' : '黒';
+  }
+
+  // 札の名前（例：黒ドクロ、白無印、赤ドクロ）
+  function cardName(type, color) {
+    if (type === 'R') return '赤ドクロ';
+    return colorName(color) + TYPE_INFO[type].name;
+  }
+
+  // 札の地の色
+  function cardTone(type, color) {
+    if (type === 'R') return 'red';
+    return color === 'white' ? 'white' : 'black';
+  }
+
   function fullHand() {
-    return { B: true, W: true, BS: true, WS: true, RS: true };
+    return { R: true, S: true, P: true };
   }
 
   function handList(hand) {
@@ -65,11 +85,39 @@
     return Boolean(match && (match.winner || match.draw));
   }
 
+  // この版のルールで作られた試合か（古い版の試合データは扱わない）
+  function isCurrentMatch(match) {
+    if (!match || !match.colors) return false;
+    const hands = match.hands || {};
+    return Object.keys(hands).every(function (pid) {
+      return Object.keys(hands[pid] || {}).every(function (k) { return CARDS.indexOf(k) !== -1; });
+    });
+  }
+
+  /**
+   * 色の割り当て。前の試合と同じ2人なら黒白を入れ替え、そうでなければ先の人が黒。
+   * players: [{ pid }]（席順）
+   */
+  function assignColors(players, prevMatch) {
+    const a = players[0] && players[0].pid;
+    const b = players[1] && players[1].pid;
+    const colors = {};
+    const prev = prevMatch && prevMatch.colors;
+    if (prev && prev[a] && prev[b]) {
+      colors[a] = prev[a] === 'black' ? 'white' : 'black';
+      colors[b] = prev[b] === 'black' ? 'white' : 'black';
+    } else {
+      if (a) colors[a] = 'black';
+      if (b) colors[b] = 'white';
+    }
+    return colors;
+  }
+
   /**
    * 新しい試合を作る。
-   * players: [{ pid, name }]（席順）
+   * players: [{ pid, name }]（席順）  colors: { pid: 'black'|'white' }
    */
-  function newMatch(id, players, now) {
+  function newMatch(id, players, now, colors) {
     const order = [];
     const names = {};
     const alive = {};
@@ -85,6 +133,7 @@
       turn: 1,
       order: order,
       names: names,
+      colors: colors || assignColors(players, null),
       alive: alive,
       hands: hands,
       seq: 0,
@@ -155,7 +204,7 @@
 
     settle(m, entry);
 
-    // 生き残りが複数いて、全員の札が尽きたら手札を戻して再戦（あいこ）
+    // 決着がつかず全員の札が尽きたら手札を戻して再戦（あいこ）
     if (!isOver(m)) {
       const survivors = alivePids(m);
       const empty = survivors.every(function (pid) { return handList(m.hands[pid]).length === 0; });
@@ -176,7 +225,7 @@
     return m;
   }
 
-  /** 途中退出・切断などで脱落扱いにする */
+  /** 途中退出・切断などで負け扱いにする */
   function forfeit(match, pid) {
     const m = clone(match);
     if (isOver(m) || !m.alive || !m.alive[pid]) return null;
@@ -186,7 +235,6 @@
     m.seq = (m.seq || 0) + 1;
     m.log = m.log || {};
     m.log[logKey(m.seq)] = entry;
-    if (isOver(m)) m.last = m.last || null;
     return m;
   }
 
@@ -197,15 +245,21 @@
 
   const api = {
     CARDS: CARDS,
-    CARD_INFO: CARD_INFO,
+    COLORS: COLORS,
+    TYPE_INFO: TYPE_INFO,
     BEATS: BEATS,
     beats: beats,
+    colorName: colorName,
+    cardName: cardName,
+    cardTone: cardTone,
     fullHand: fullHand,
     handList: handList,
     asArray: asArray,
     alivePids: alivePids,
     turnKey: turnKey,
     isOver: isOver,
+    isCurrentMatch: isCurrentMatch,
+    assignColors: assignColors,
     newMatch: newMatch,
     resolveTurn: resolveTurn,
     forfeit: forfeit,
