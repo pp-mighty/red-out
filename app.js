@@ -395,7 +395,7 @@
       '<div class="home">' +
       fan +
       '<h1 class="title">RED OUT</h1>' +
-      '<p class="lede">5枚の札で読み合う、ドクロのじゃんけん。</p>' +
+      '<p class="lede">5枚の札で読み合うドクロのじゃんけん。</p>' +
       (state.notice ? '<p class="notice" role="status" style="margin:0 0 12px">' + esc(state.notice) + '</p>' : '') +
       panel +
       '<div class="home-foot"><button class="btn btn-text" data-action="open-rules">ルールを見る</button></div>' +
